@@ -1,5 +1,5 @@
 // /opt/corelax-service-pi/service-pi-listener.mjs
-// Corelax Service Pi Listener (realtime-first + adaptive polling + alias compatibility)
+// Corelax Service Pi Listener (realtime-first + safety-net polling + alias compatibility)
 
 import "dotenv/config";
 import WebSocket from "ws";
@@ -49,12 +49,12 @@ const mqttClient = mqtt.connect(ENV.MQTT_URL, {
 let mqttReady = false;
 mqttClient.on("connect", () => {
   mqttReady = true;
-  console.log("[OK] MQTT connected");
+  console.log("✅ MQTT connected");
 });
-mqttClient.on("reconnect", () => console.log("[...] MQTT reconnecting"));
+mqttClient.on("reconnect", () => console.log("… MQTT reconnecting"));
 mqttClient.on("close", () => {
   mqttReady = false;
-  console.log("[X] MQTT closed");
+  console.log("❌ MQTT closed");
 });
 mqttClient.on("error", (e) => console.error("MQTT error", e?.message || e));
 
@@ -62,11 +62,11 @@ if (ENV.DEBUG_MQTT_ECHO) {
   const canonDebug = `site/${ENV.SITE_ID}/#`;
   mqttClient.subscribe(canonDebug, { qos: 0 }, (err) => {
     if (err) console.error("MQTT debug subscribe error:", err?.message || err);
-    else console.log("[DEBUG] Debug subscribed:", canonDebug);
+    else console.log("🔎 Debug subscribed:", canonDebug);
   });
   mqttClient.on("message", (topic, msg) => {
     try {
-      console.log("[DEBUG] IN", topic, msg.toString());
+      console.log("🔎 IN", topic, msg.toString());
     } catch {}
   });
 }
@@ -106,6 +106,7 @@ function chairAlias(target) {
   if (!m) return null;
   return `chair${parseInt(m[1], 10)}/control`;
 }
+
 function normalizeType(raw) {
   const t = String(raw || "")
     .trim()
@@ -165,7 +166,7 @@ async function processCommand(cmd) {
 
   const type = normalizeType(cmd?.command_type);
   const p = cmd?.payload || {};
-  console.log("[CMD]", id, type, JSON.stringify(p));
+  console.log("📥 CMD", id, type, JSON.stringify(p));
 
   const { data: claimed, error: claimErr } = await supabase.rpc("ack_command", {
     p_command_id: id,
@@ -175,7 +176,8 @@ async function processCommand(cmd) {
     return;
   }
   if (!claimed) {
-    console.warn("[SKIP] skip (already claimed/invalid status)");
+    console.warn("↩  skip (already claimed/invalid status)");
+    markProcessed(id);
     return;
   }
 
@@ -196,7 +198,7 @@ async function processCommand(cmd) {
           publishedOk = true;
         }),
       ]);
-      console.log(`MQTT -> ${canon} & ${doorAlias()} ${JSON.stringify(msg)}`);
+      console.log(`MQTT → ${canon} & ${doorAlias()} ${JSON.stringify(msg)}`);
     } else if (type === "water_pulse") {
       const pulse_ms = p.pulse_ms ?? p.args?.pulse_ms ?? 2000;
       const tgt = target || "esp-cooler-01";
@@ -216,7 +218,7 @@ async function processCommand(cmd) {
           .catch(() => {}),
       ]);
       console.log(
-        `MQTT -> ${canon} & ${waterAlias()} ${JSON.stringify(msg)} (+ 'START')`
+        `MQTT → ${canon} & ${waterAlias()} ${JSON.stringify(msg)} (+ 'START')`
       );
     } else if (
       type === "fan_start" ||
@@ -234,7 +236,7 @@ async function processCommand(cmd) {
           })
           .catch(() => {}),
       ]);
-      console.log(`MQTT -> ${fanAlias()} 'START' (+ ${canon} JSON)`);
+      console.log(`MQTT → ${fanAlias()} 'START' (+ ${canon} JSON)`);
     } else if (
       type === "fan_stop" ||
       (type === "stop" && isFanTarget(target))
@@ -251,7 +253,7 @@ async function processCommand(cmd) {
           })
           .catch(() => {}),
       ]);
-      console.log(`MQTT -> ${fanAlias()} 'STOP' (+ ${canon} JSON)`);
+      console.log(`MQTT → ${fanAlias()} 'STOP' (+ ${canon} JSON)`);
     } else if (type === "chair_start") {
       const minutes = Math.max(
         1,
@@ -272,7 +274,7 @@ async function processCommand(cmd) {
           : Promise.resolve(),
       ]);
       console.log(
-        `MQTT -> ${canon} ${JSON.stringify(msg)}${
+        `MQTT → ${canon} ${JSON.stringify(msg)}${
           alias ? ` (+ ${alias}: 'START')` : ""
         }`
       );
@@ -294,7 +296,7 @@ async function processCommand(cmd) {
           : Promise.resolve(),
       ]);
       console.log(
-        `MQTT -> ${canon} ${JSON.stringify(msg)}${
+        `MQTT → ${canon} ${JSON.stringify(msg)}${
           alias ? ` (+ ${alias}: 'STOP')` : ""
         }`
       );
@@ -307,9 +309,9 @@ async function processCommand(cmd) {
     if (!publishedOk)
       throw new Error("MQTT publish failed (no path succeeded)");
     await completeCommand(id, true, null);
-    console.log("[OK] completed", String(id).slice(0, 8));
+    console.log("✅ completed", String(id).slice(0, 8));
   } catch (e) {
-    console.error("[ERROR] command error", e?.message || e);
+    console.error("💥 command error", e?.message || e);
     await completeCommand(id, false, String(e?.message || e));
   } finally {
     markProcessed(id);
@@ -323,7 +325,7 @@ function startPolling(ms = ENV.POLL_MS_BASE) {
   if (pollTimer) clearInterval(pollTimer);
   pollingMs = ms;
   pollTimer = setInterval(pollPending, pollingMs);
-  console.log(`[POLL] Polling every ${pollingMs}ms (safety-net)`);
+  console.log(`🕒 Polling every ${pollingMs}ms (safety-net)`);
 }
 async function pollPending() {
   try {
@@ -335,7 +337,7 @@ async function pollPending() {
       return;
     }
     if (rows?.length) {
-      console.log(`[POLL] Poll picked up ${rows.length} command(s)`);
+      console.log(`🔔 Poll picked up ${rows.length} command(s)`);
       for (const r of rows) {
         await processCommand(r);
         await sleep(120);
@@ -362,7 +364,7 @@ async function subscribeRealtime() {
         if (payload?.new) processCommand(payload.new);
       }
     )
-    .subscribe((status) => console.log("[RT] Realtime status:", status));
+    .subscribe((status) => console.log("📡 Realtime status:", status));
 }
 
 // ---------- Boot ----------
@@ -383,16 +385,15 @@ async function boot() {
     if (t) supabase.realtime.setAuth(t);
   });
 
-  // Catch-up poll on boot, then start safety-net polling + realtime
   await pollPending();
   startPolling(ENV.POLL_MS_BASE);
   await subscribeRealtime();
 
   if (!mqttReady) {
-    console.log("[WAIT] Waiting for MQTT connect...");
+    console.log("⏳ Waiting for MQTT connect...");
     for (let i = 0; i < 10 && !mqttReady; i++) await sleep(300);
   }
-  console.log("[READY] Service Pi listener ready:", {
+  console.log("🚀 Service Pi listener ready:", {
     device: ENV.DEVICE_ID,
     site: ENV.SITE_ID,
     mqttReady,
